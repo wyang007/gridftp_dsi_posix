@@ -19,12 +19,15 @@
 
    2009-03-16: Wei Yang  yangw@slac.stanford.edu
       *  add Adler32 checksum. (need -lz when linking the .so)
-   2016-02-22: Wei Yang  yangw@slac.stanford.edu
-      *  in globus_l_gfs_posix_command(), include errno in the return. 
+   2016-02-23: Wei Yang  yangw@slac.stanford.edu
+      *  Return errno for various operations
+   2017-04-13: Wei Yang  yangw@slac.stanford.edu
+      *  add MD5 checksum (need -lssl when linking the .so)
+      *  Add GRIDFTP_APPEND_XROOTD_CGI
 
  */
 
-/* $Id$ */
+/* $Id: $ */
 
 /************************************************************************/
 /* How to compile:                                                      */
@@ -79,6 +82,7 @@
 */
 
 #include <zlib.h>
+#include <openssl/md5.h>
 #include "globus_gridftp_server.h"
 
 static
@@ -572,6 +576,53 @@ globus_l_gfs_posix_cksm_adler32(
 }
 
 /*************************************************************************
+ * MD5 checksum
+ ************************************************************************/
+globus_result_t 
+globus_l_gfs_posix_cksm_md5(
+    char *                             filename,
+    char *                             cksm)
+{
+    int rc, fd, len, i;
+    char *ext_md5, buf[65536], ext_cmd[1024], *pt;
+    FILE *F;
+    struct stat stbuf;
+    MD5_CTX c;
+    unsigned char md5digest[MD5_DIGEST_LENGTH];
+
+    ext_md5 = NULL;
+    if ((ext_md5 = getenv("GRIDFTP_CKSUM_EXT_MD5")) != NULL)
+    {
+        strcpy(ext_cmd, ext_md5);
+        strcat(ext_cmd, " ");
+        strcat(ext_cmd, filename);
+        F = popen(ext_cmd, "r");
+        if (F == NULL) return GLOBUS_FAILURE;
+        fscanf(F, "%s", cksm);
+        pclose(F);
+
+        pt = strchr(cksm, ' ');
+        if (pt != NULL) pt[0] = '\0'; /* take the first string */ 
+    }
+    else /* calculate md5 */
+    {
+        rc = stat(filename, &stbuf);
+        if (rc != 0 || ! S_ISREG(stbuf.st_mode) || (fd = open(filename,O_RDONLY)) < 0)
+            return GLOBUS_FAILURE;
+        MD5_Init(&c);
+        while ((len = read(fd, buf, 65536)) > 0)
+            MD5_Update(&c, buf, len);
+        close(fd);
+        MD5_Final(md5digest, &c);
+        for(i = 0; i < MD5_DIGEST_LENGTH; ++i)
+            sprintf(&cksm[i*2], "%02x", (unsigned int)md5digest[i]);
+        cksm[MD5_DIGEST_LENGTH*2+1] = '\0';
+
+    }
+    return GLOBUS_SUCCESS;
+}
+
+/*************************************************************************
  *  command
  *  -------
  *  This interface function is called when the client sends a 'command'.
@@ -645,6 +696,9 @@ globus_l_gfs_posix_command(
         if (!strcmp(cmd_info->cksm_alg, "adler32") || 
             !strcmp(cmd_info->cksm_alg, "ADLER32"))
             rc = globus_l_gfs_posix_cksm_adler32(PathName, cmd_data);
+        else if (!strcmp(cmd_info->cksm_alg, "md5") ||
+                  !strcmp(cmd_info->cksm_alg, "MD5"))
+            rc = globus_l_gfs_posix_cksm_md5(PathName, cmd_data);
         else
             rc = GLOBUS_FAILURE;
         break;
@@ -704,7 +758,7 @@ globus_l_gfs_posix_write_to_storage_cb(
 
         if (posix_handle->seekable && start_offset != offset) 
         {
-            rc = GlobusGFSErrorGeneric("lseek() fail");
+            rc = GlobusGFSErrorSystemError("lseek", errno);
             posix_handle->done = GLOBUS_TRUE;
         }
         else
@@ -712,7 +766,7 @@ globus_l_gfs_posix_write_to_storage_cb(
             bytes_written = write(posix_handle->fd, buffer, nbytes);
             if (bytes_written < nbytes) 
             {
-                rc = GlobusGFSErrorGeneric("write() fail");
+                rc = GlobusGFSErrorSystemError("write", errno);
                 posix_handle->done = GLOBUS_TRUE;
             }
             else
@@ -747,7 +801,7 @@ globus_l_gfs_posix_write_to_storage_cb(
     {
         if (close(posix_handle->fd) == -1) 
         {
-             rc = GlobusGFSErrorGeneric("close() fail");
+             rc = GlobusGFSErrorSystemError("close", errno);
         }
         sprintf(err_msg,"receive %d blocks of size %d bytes\n",
                         local_io_count,local_io_block_size);
@@ -822,6 +876,9 @@ globus_l_gfs_posix_recv(
     globus_l_gfs_posix_handle_t *      posix_handle;
     globus_result_t                     rc; 
     struct stat                         stat_buffer;
+    char *filename;
+
+    filename=NULL;
 
     GlobusGFSName(globus_l_gfs_posix_recv);
 
@@ -844,24 +901,90 @@ globus_l_gfs_posix_recv(
 
     globus_gridftp_server_begin_transfer(posix_handle->op, 0, posix_handle);
 
+/* 
+   Calculate space usage of a xrootd space token. This is xrootd specific.
+   None xrootd storage can still use it if XROOTD_CNSURL is not defined 
+*/
+    char *cns, *token, *tokenbuf[128], *key, *value, xattrs[1024], *xattrbuf[1024];
+    long long spaceusage, spacequota;
+
+    char ext_cmd[1024], *tfilename;
+    FILE *F;
+
+    cns = getenv("XROOTD_CNSURL");
+    if (cns != NULL)
+    {
+        strcpy(xattrs, posix_handle->pathname);
+        token = strtok_r(xattrs, "?", xattrbuf);
+        token = strtok_r(NULL, "=", xattrbuf);
+        token = strtok_r(NULL, "=", xattrbuf);
+        sprintf(err_msg, "open() fail: quota exceeded for space token %s\n", token);
+
+        strcat(cns, "/?oss.cgroup=");
+        if (token == NULL)
+            strcat(cns, "public");
+        else
+            strcat(cns, token);
+
+        if (getxattr(cns, "xroot.space", xattrs, 128) > 0)
+        {
+            spaceusage = 0;
+            spacequota = 0;
+            token = strtok_r(xattrs, "&", xattrbuf);
+            while (token != NULL)
+            {
+                 token = strtok_r(NULL, "&", xattrbuf);
+                 if (token == NULL) break;
+                 key = strtok_r(token, "=", tokenbuf);
+                 value = strtok_r(NULL, "=", tokenbuf);
+                 if (!strcmp(key,"oss.used"))
+                 {
+                     sscanf((const char*)value, "%lld", &spaceusage);
+                 }
+                 else if (!strcmp(key,"oss.quota"))
+                 {
+                     sscanf((const char*)value, "%lld", &spacequota);
+                 }
+            }
+            if (spaceusage > spacequota) 
+            {
+                rc = GlobusGFSErrorGeneric(err_msg);
+                globus_gridftp_server_finished_transfer(op, rc);
+                return;
+            }
+        }
+    }
+
+    if ((tfilename = getenv("GRIDFTP_APPEND_XROOTD_CGI")) != NULL)  // transform filepath to be opened
+    {
+        strcpy(ext_cmd, tfilename);
+        strcat(ext_cmd, " ");
+        strcat(ext_cmd, posix_handle->pathname);
+
+        F = popen(ext_cmd, "r");
+        if (F) 
+        {
+            filename = malloc(sizeof(char)*1024);
+            fscanf(F, "%s", filename);
+            pclose(F);
+        }
+    }
+/* end of XROOTD specfic code */
+    
+    if ( filename == NULL ) filename = posix_handle->pathname;
     if (stat(posix_handle->pathname, &stat_buffer) == 0)
     {
-        posix_handle->fd = open(posix_handle->pathname, O_WRONLY); /* |O_TRUNC);  */
+        posix_handle->fd = open(filename, O_WRONLY); /* |O_TRUNC);  */
     }
     else if (errno == ENOENT)
     {
-        posix_handle->fd = open(posix_handle->pathname, O_WRONLY|O_CREAT,
+        posix_handle->fd = open(filename, O_WRONLY|O_CREAT,
                                  S_IRUSR|S_IWUSR|S_IRGRP|S_IROTH);    
-    }
-    else
-    {
-        rc = GlobusGFSErrorGeneric("stat() fail");
-        globus_gridftp_server_finished_transfer(op, rc);
     }
 
     if (posix_handle->fd == -1)
     {
-        rc = GlobusGFSErrorGeneric("open() fail");
+        rc = GlobusGFSErrorSystemError("open", errno);
         globus_gridftp_server_finished_transfer(op, rc);
     }
 
@@ -1052,7 +1175,7 @@ globus_l_gfs_posix_send(
     posix_handle->fd = open(posix_handle->pathname, O_RDONLY);
     if (posix_handle->fd == -1)
     {
-        rc = GlobusGFSErrorGeneric("open() fail");
+        rc = GlobusGFSErrorSystemError("open", errno);
         globus_gridftp_server_finished_transfer(op, rc);
     }
 
