@@ -24,6 +24,11 @@
    2017-04-13: Wei Yang  yangw@slac.stanford.edu
       *  add MD5 checksum (need -lssl when linking the .so)
       *  Add GRIDFTP_APPEND_XROOTD_CGI
+   2017-05-02: Wei Yang  yangw@slac.stanford.edu
+      *  add support to GLOBUS_GFS_CMD_TRNC 
+                        GLOBUS_GFS_CMD_SITE_CHGRP
+                        GLOBUS_GFS_CMD_SITE_UTIME
+                        GLOBUS_GFS_CMD_SITE_SYMLINK
 
  */
 
@@ -81,6 +86,10 @@
    while (pathname[0] == '/' && pathname[1] == '/') { pathname++; }
 */
 
+#include <unistd.h>
+#include <sys/types.h>
+#include <utime.h>
+#include <errno.h>
 #include <zlib.h>
 #include <openssl/md5.h>
 #include "globus_gridftp_server.h"
@@ -649,9 +658,10 @@ globus_l_gfs_posix_command(
     void *                              user_arg)
 {
     char *                              PathName;
-    globus_l_gfs_posix_handle_t *      posix_handle;
+    globus_l_gfs_posix_handle_t *       posix_handle;
     globus_result_t                     rc;
     char                                cmd_data[128];
+    struct utimbuf                      ubuf;
     GlobusGFSName(globus_l_gfs_posix_command);
 
     posix_handle = (globus_l_gfs_posix_handle_t *) user_arg;
@@ -677,6 +687,10 @@ globus_l_gfs_posix_command(
         (unlink(PathName) == 0) ||
             (rc = GlobusGFSErrorSystemError("unlink", errno)); 
         break;
+      case GLOBUS_GFS_CMD_TRNC:
+        (truncate(PathName, cmd_info->cksm_offset) == 0) ||
+            (rc = GlobusGFSErrorSystemError("truncate", errno)); 
+        break;
       case GLOBUS_GFS_CMD_SITE_RDEL:
 /*
         result = globus_l_gfs_file_delete(
@@ -691,6 +705,20 @@ globus_l_gfs_posix_command(
       case GLOBUS_GFS_CMD_SITE_CHMOD:
         (chmod(PathName, cmd_info->chmod_mode) == 0) ||
             (rc = GlobusGFSErrorSystemError("chmod", errno)); 
+        break;
+      case GLOBUS_GFS_CMD_SITE_CHGRP:
+        rc = GlobusGFSErrorSystemError("chgrp", EACCES);
+        break;
+      case GLOBUS_GFS_CMD_SITE_UTIME:
+        ubuf.modtime = cmd_info->utime_time;
+        ubuf.actime = time(NULL);
+
+        (utime(PathName, &ubuf) == 0) || 
+            (rc = GlobusGFSErrorSystemError("utime", errno));
+        break;
+      case GLOBUS_GFS_CMD_SITE_SYMLINK:
+        (symlink(cmd_info->from_pathname, cmd_info->pathname) == 0) || 
+            (rc = GlobusGFSErrorSystemError("symlink", errno));
         break;
       case GLOBUS_GFS_CMD_CKSM:
         if (!strcmp(cmd_info->cksm_alg, "adler32") || 
