@@ -88,6 +88,7 @@
 
 #include <unistd.h>
 #include <sys/types.h>
+#include <grp.h>
 #include <utime.h>
 #include <errno.h>
 #include <zlib.h>
@@ -540,6 +541,44 @@ error_stat1:
 
 /*    GlobusGFSFileDebugExitWithError();  */
 }
+
+/* change group */
+static
+globus_result_t
+globus_l_gfs_posix_chgrp(
+    const char *                        pathname,
+    const char *                        group)
+{
+    int                                 rc;
+    globus_result_t                     result;
+    struct group *                      grp_info;
+    int                                 grp_id;
+    char*                               endpt;
+
+    GlobusGFSName(globus_l_gfs_posix_chgrp);
+
+    grp_info = getgrnam(group);
+    if(grp_info != NULL)
+    {
+        grp_id = grp_info->gr_gid;
+    }
+    else 
+    {
+        grp_id = strtol(group, &endpt, 10);
+        if(*group == '\0' || *endpt != '\0') 
+        {
+            errno = EPERM;
+            return GLOBUS_FAILURE; 
+        }
+    }
+    if(grp_id < 0) {
+	errno = EPERM;
+        return GLOBUS_FAILURE;
+    }
+    if (chown(pathname, -1, grp_id) != 0) return GLOBUS_FAILURE;
+    return GLOBUS_SUCCESS;
+}
+
 /*************************************************************************
  * Adler23 checksum
  ************************************************************************/
@@ -707,7 +746,8 @@ globus_l_gfs_posix_command(
             (rc = GlobusGFSErrorSystemError("chmod", errno)); 
         break;
       case GLOBUS_GFS_CMD_SITE_CHGRP:
-        rc = GlobusGFSErrorSystemError("chgrp", EACCES);
+        (globus_l_gfs_posix_chgrp(PathName, cmd_info->chgrp_group) == 0) ||
+            (rc = GlobusGFSErrorSystemError("chgrp", errno));
         break;
       case GLOBUS_GFS_CMD_SITE_UTIME:
         ubuf.modtime = cmd_info->utime_time;
