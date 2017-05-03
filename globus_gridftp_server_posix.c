@@ -12,6 +12,7 @@
 /*     globus_l_gfs_file_destroy_stat()                                 */
 /*     globus_l_gfs_file_partition_path()                               */
 /*     globus_l_gfs_posix_stat()                                        */
+/*     globus_l_gfs_file_delete_dir()                                   */
 /*                                                                      */
 /************************************************************************/
 
@@ -26,6 +27,7 @@
       *  Add GRIDFTP_APPEND_XROOTD_CGI
    2017-05-02: Wei Yang  yangw@slac.stanford.edu
       *  add support to GLOBUS_GFS_CMD_TRNC 
+                        GLOBUS_GFS_CMD_SITE_RDEL
                         GLOBUS_GFS_CMD_SITE_CHGRP
                         GLOBUS_GFS_CMD_SITE_UTIME
                         GLOBUS_GFS_CMD_SITE_SYMLINK
@@ -90,6 +92,7 @@
 #include <sys/types.h>
 #include <grp.h>
 #include <utime.h>
+#include <dirent.h>
 #include <errno.h>
 #include <zlib.h>
 #include <openssl/md5.h>
@@ -542,6 +545,118 @@ error_stat1:
 /*    GlobusGFSFileDebugExitWithError();  */
 }
 
+/* recursively delete a directory */
+static
+globus_result_t
+globus_l_gfs_file_delete_dir(
+    const char *                        pathname)
+{
+
+    globus_result_t                     result;
+    int                                 rc;
+    DIR *                               dir;
+    struct stat                         stat_buf;
+    struct dirent *                     dir_entry;
+    int                                 i;
+    char                                path[MAXPATHLEN];
+    GlobusGFSName(globus_l_gfs_file_delete_dir);
+    GlobusGFSFileDebugEnter();
+    
+    /* lstat is the same as stat when not operating on a link */
+    if(lstat(pathname, &stat_buf) != 0)
+    {
+        result = GlobusGFSErrorSystemError("stat", errno);
+        goto error_stat;
+    }
+    
+    if(!S_ISDIR(stat_buf.st_mode))
+    {
+        /* remove anything that isn't a dir -- don't follow links */
+        rc = unlink(pathname);       
+        if(rc != 0)
+        {
+            result = GlobusGFSErrorSystemError("unlink", errno);
+            goto error_unlink1;
+        }
+    }
+    else
+    {
+        dir = globus_libc_opendir(pathname);
+        if(!dir)
+        {
+            result = GlobusGFSErrorSystemError("opendir", errno);
+            goto error_open;
+        }
+        
+        for(i = 0;
+            globus_libc_readdir_r(dir, &dir_entry) == 0 && dir_entry;
+            i++)
+        {   
+            if(dir_entry->d_name[0] == '.' && 
+                (dir_entry->d_name[1] == '\0' || 
+                (dir_entry->d_name[1] == '.' && dir_entry->d_name[2] == '\0')))
+            {
+                globus_free(dir_entry);
+                continue;
+            }
+            snprintf(path, sizeof(path), "%s/%s", pathname, dir_entry->d_name);
+            path[MAXPATHLEN - 1] = '\0';
+              
+            /* lstat is the same as stat when not operating on a link */
+            if(lstat(path, &stat_buf) != 0)
+            {
+                result = GlobusGFSErrorSystemError("lstat", errno);
+                globus_free(dir_entry);
+                /* just skip invalid entries */
+                continue;
+            }
+            
+            if(!S_ISDIR(stat_buf.st_mode))
+            {
+                /* remove anything that isn't a dir -- don't follow links */
+                rc = unlink(path);       
+                if(rc != 0)
+                {
+                    result = GlobusGFSErrorSystemError("unlink", errno);
+                    goto error_unlink2;
+                }
+            }
+            else
+            {
+                result = globus_l_gfs_file_delete_dir(path);
+                if(result != GLOBUS_SUCCESS)
+                {
+                    goto error_recurse;
+                }
+            }
+
+            globus_free(dir_entry);
+        }
+
+        closedir(dir);
+        rc = rmdir(pathname);
+        if(rc != 0)
+        {
+            result = GlobusGFSErrorSystemError("rmdir", errno);
+            goto error_rmdir;
+        }
+    } 
+    
+    GlobusGFSFileDebugExit();
+    return GLOBUS_SUCCESS;
+
+error_recurse:
+error_unlink2:
+        closedir(dir);
+        globus_free(dir_entry);
+error_open: 
+error_stat:
+error_unlink1:
+error_rmdir:    
+    GlobusGFSFileDebugExitWithError();
+    return result; 
+}
+
 /* change group */
 static
 globus_result_t
@@ -731,11 +846,7 @@ globus_l_gfs_posix_command(
             (rc = GlobusGFSErrorSystemError("truncate", errno)); 
         break;
       case GLOBUS_GFS_CMD_SITE_RDEL:
-/*
-        result = globus_l_gfs_file_delete(
-            op, PathName, GLOBUS_TRUE);
- */
-        rc = GLOBUS_FAILURE;
+        rc = globus_l_gfs_file_delete_dir(PathName);
         break;
       case GLOBUS_GFS_CMD_RNTO:
         (rename(cmd_info->rnfr_pathname, PathName) == 0) || 
