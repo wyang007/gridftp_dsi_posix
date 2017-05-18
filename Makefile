@@ -22,8 +22,7 @@ globus_gridftp_server_posix.o:
 		$(DSI_LDFLAGS) $(DSI_LIBS)
 
 install:
-	cp -f libglobus_gridftp_server_posix_$(FLAVOR).so $(GLOBUS_LOCATION)/ 
-lib
+	cp -f libglobus_gridftp_server_posix_$(FLAVOR).so $(GLOBUS_LOCATION)/lib
 
 clean:
 	rm -f *.so
