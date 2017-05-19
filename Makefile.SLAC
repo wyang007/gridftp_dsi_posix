@@ -1,0 +1,35 @@
+#include makefile_header
+# include additional makefile headers here
+GLOBUS_LOCATION = ../../../../../@sys
+GLOBUS_CC=gcc
+
+# add needed cflags here
+DSI_CFLAGS= -g -O -fPIC # -DHAVE_CONFIG_H -Wall -DGLOBUS_BUILTIN -fPIC -DPIC
+DSI_CFLAGS= -g -O -fPIC -D_FILE_OFFSET_BITS=64
+
+FLAVOR=gcc64dbg
+
+# add needed includes here
+DSI_INCLUDES=$(GLOBUS_INCLUDES)
+DSI_INCLUDES= -I../../../../../@sys/include 
+
+# added needed ldflags here
+DSI_LDFLAGS=$(GLOBUS_LDFLAGS)
+
+# add needed libraries here
+DSI_LIBS= -lz -lssl
+
+globus_gridftp_server_posix.o:
+	$(GLOBUS_CC) $(DSI_CFLAGS) $(DSI_INCLUDES) \
+		-shared -o libglobus_gridftp_server_posix_$(FLAVOR).so \
+		globus_gridftp_server_posix.c \
+		$(DSI_LDFLAGS) $(DSI_LIBS)
+# GridFTP from OSG rpms is looking for libglobus_gridftp_server_posix.so
+	ln -f libglobus_gridftp_server_posix_$(FLAVOR).so libglobus_gridftp_server_posix.so
+
+install:
+	cp -f libglobus_gridftp_server_posix_$(FLAVOR).so $(GLOBUS_LOCATION)/lib
+	ln -f $(GLOBUS_LOCATION)/lib/libglobus_gridftp_server_posix_$(FLAVOR).so $(GLOBUS_LOCATION)/lib/libglobus_gridftp_server_posix.so
+
+clean:
+	rm -f *.so
