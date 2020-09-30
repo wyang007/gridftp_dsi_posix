@@ -761,6 +761,8 @@ struct globus_l_gfs_posix_cksm_md5_cb_t
     globus_off_t                       offset;
     globus_off_t                       length;
     globus_off_t                       total_bytes;
+    int                                marker_freq;
+    time_t                             t_lastmarker;
 };
 
 #define MAXBLOCSIZE4CKSM 4*1024*1024
@@ -773,7 +775,8 @@ globus_l_gfs_posix_cksm_md5_cb(
     globus_off_t                       readlen;
     globus_result_t                    result;
     unsigned char                      md5digest[MD5_DIGEST_LENGTH];
-    int i;
+    int                                i;
+    time_t                             t;
 
     struct globus_l_gfs_posix_cksm_md5_cb_t * mmm;
 
@@ -801,9 +804,14 @@ globus_l_gfs_posix_cksm_md5_cb(
 
         MD5_Update(&(mmm->c), buffer, readlen);
 
-        char                        count[128];
-        sprintf(count, "%"GLOBUS_OFF_T_FORMAT, mmm->total_bytes);
-        globus_gridftp_server_intermediate_command(mmm->op, GLOBUS_SUCCESS, count);
+        t = time(NULL);
+        if ( (t - mmm->t_lastmarker) > mmm->marker_freq )
+        {
+            mmm->t_lastmarker = t;
+            char                        count[128];
+            sprintf(count, "%"GLOBUS_OFF_T_FORMAT, mmm->total_bytes);
+            globus_gridftp_server_intermediate_command(mmm->op, GLOBUS_SUCCESS, count);
+        }
 
         result = globus_callback_register_oneshot( NULL,
                                                    NULL,
@@ -869,6 +877,8 @@ globus_l_gfs_posix_cksm_md5(
         mmm->offset = offset;
         mmm->length = length;
         mmm->total_bytes = 0;
+        globus_gridftp_server_get_update_interval(op, &mmm->marker_freq);
+        mmm->t_lastmarker = time(NULL);
 
         result = globus_callback_register_oneshot( NULL,
                                                    NULL,
