@@ -778,45 +778,44 @@ globus_l_gfs_posix_cksm_md5_cb(
     int                                i;
     time_t                             t;
 
-    struct globus_l_gfs_posix_cksm_md5_cb_t * mmm;
+    struct globus_l_gfs_posix_cksm_md5_cb_t * md5updt;
 
-    mmm = (struct globus_l_gfs_posix_cksm_md5_cb_t *) user_arg;
-    lseek(mmm->fd, mmm->offset, SEEK_SET); 
-    if ( mmm->length == 0 )
+    md5updt = (struct globus_l_gfs_posix_cksm_md5_cb_t *) user_arg;
+    if ( md5updt->length == 0 )
     {
-        close(mmm->fd);
+        close(md5updt->fd);
 
-        MD5_Final(md5digest, &(mmm->c));
+        MD5_Final(md5digest, &(md5updt->c));
         for(i = 0; i < MD5_DIGEST_LENGTH; ++i)
             sprintf(&cksm[i*2], "%02x", (unsigned int)md5digest[i]);
         cksm[MD5_DIGEST_LENGTH*2+1] = '\0';
 
-        globus_gridftp_server_finished_command(mmm->op, GLOBUS_SUCCESS, cksm);       
-        globus_free(mmm);
+        globus_gridftp_server_finished_command(md5updt->op, GLOBUS_SUCCESS, cksm);       
+        globus_free(md5updt);
     }
     else
     {
-        readlen = read(mmm->fd, buffer, ( mmm->length > mmm->blocksize ?
-                                          mmm->blocksize : mmm->length ) );
-        mmm->offset += readlen;
-        mmm->length -= readlen;
-        mmm->total_bytes += readlen;
+        readlen = read(md5updt->fd, buffer, ( md5updt->length > md5updt->blocksize ?
+                                          md5updt->blocksize : md5updt->length ) );
+        md5updt->offset += readlen;
+        md5updt->length -= readlen;
+        md5updt->total_bytes += readlen;
 
-        MD5_Update(&(mmm->c), buffer, readlen);
+        MD5_Update(&(md5updt->c), buffer, readlen);
 
         t = time(NULL);
-        if ( (t - mmm->t_lastmarker) > mmm->marker_freq )
+        if ( (t - md5updt->t_lastmarker) > md5updt->marker_freq )
         {
-            mmm->t_lastmarker = t;
+            md5updt->t_lastmarker = t;
             char                        count[128];
-            sprintf(count, "%"GLOBUS_OFF_T_FORMAT, mmm->total_bytes);
-            globus_gridftp_server_intermediate_command(mmm->op, GLOBUS_SUCCESS, count);
+            sprintf(count, "%"GLOBUS_OFF_T_FORMAT, md5updt->total_bytes);
+            globus_gridftp_server_intermediate_command(md5updt->op, GLOBUS_SUCCESS, count);
         }
 
         result = globus_callback_register_oneshot( NULL,
                                                    NULL,
                                                    globus_l_gfs_posix_cksm_md5_cb,
-                                                   mmm);
+                                                   md5updt);
         if(result != GLOBUS_SUCCESS)
         {
             result = GlobusGFSErrorWrapFailed(
@@ -858,32 +857,35 @@ globus_l_gfs_posix_cksm_md5(
     }
     else /* calculate md5 */
     {
-        struct globus_l_gfs_posix_cksm_md5_cb_t * mmm;
+        struct globus_l_gfs_posix_cksm_md5_cb_t * md5updt;
 
         rc = stat(filename, &stbuf);
         if (rc != 0 || ! S_ISREG(stbuf.st_mode) || (fd = open(filename,O_RDONLY)) < 0)
             return GLOBUS_FAILURE;
 
-        mmm = globus_malloc(sizeof( struct globus_l_gfs_posix_cksm_md5_cb_t));
-        MD5_Init(&(mmm->c));
+        md5updt = globus_malloc(sizeof( struct globus_l_gfs_posix_cksm_md5_cb_t));
+        MD5_Init(&(md5updt->c));
 
         if (length < 0 || (offset + length) > stbuf.st_size) 
             length = stbuf.st_size - offset;
 
-        mmm->op = op;
-        mmm->fd = fd;
-        mmm->blocksize = MAXBLOCSIZE4CKSM;
-        mmm->fsize = stbuf.st_size;
-        mmm->offset = offset;
-        mmm->length = length;
-        mmm->total_bytes = 0;
-        globus_gridftp_server_get_update_interval(op, &mmm->marker_freq);
-        mmm->t_lastmarker = time(NULL);
+        lseek(fd, offset, SEEK_SET); 
+
+        md5updt->op = op;
+        md5updt->fd = fd;
+        md5updt->blocksize = MAXBLOCSIZE4CKSM;
+        md5updt->fsize = stbuf.st_size;
+        md5updt->offset = offset;
+        md5updt->length = length;
+        md5updt->total_bytes = 0;
+        globus_gridftp_server_get_update_interval(op, &md5updt->marker_freq);
+        md5updt->t_lastmarker = time(NULL);
+
 
         result = globus_callback_register_oneshot( NULL,
                                                    NULL,
                                                    globus_l_gfs_posix_cksm_md5_cb,
-                                                   mmm);
+                                                   md5updt);
         if(result != GLOBUS_SUCCESS)
         {
             result = GlobusGFSErrorWrapFailed(
