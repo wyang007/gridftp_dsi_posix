@@ -31,6 +31,8 @@
                         GLOBUS_GFS_CMD_SITE_CHGRP
                         GLOBUS_GFS_CMD_SITE_UTIME
                         GLOBUS_GFS_CMD_SITE_SYMLINK
+   2020-09-28: Wei Yang  yangw@slac.stanford.edu
+      *  send progress mark during internal MD5 checksuming
 
  */
 
@@ -154,6 +156,8 @@ globus_l_gfs_posix_start(
     struct passwd *                     pw;
 
     GlobusGFSName(globus_l_gfs_posix_start);
+
+    globus_gridftp_server_set_checksum_support(op, "MD5:10");
 
     posix_handle = (globus_l_gfs_posix_handle_t *)
         globus_malloc(sizeof(globus_l_gfs_posix_handle_t));
@@ -694,13 +698,16 @@ globus_l_gfs_posix_chgrp(
     return GLOBUS_SUCCESS;
 }
 
+/* cksm from external call main initially include path */
+char    cksm[512];
+
 /*************************************************************************
  * Adler23 checksum
  ************************************************************************/
 globus_result_t 
 globus_l_gfs_posix_cksm_adler32(
-    char *                             filename,
-    char *                             cksm)
+    globus_gfs_operation_t             op,
+    char *                             filename)
 {
     int rc, fd, len;
     char *ext_adler32, buf[65536], ext_cmd[1024], *pt;
@@ -735,23 +742,95 @@ globus_l_gfs_posix_cksm_adler32(
         sprintf(cksm, "%08x", adler);
         cksm[8] = '\0';
     }
+
+    globus_gridftp_server_finished_command(op, GLOBUS_SUCCESS, cksm);       
     return GLOBUS_SUCCESS;
 }
 
 /*************************************************************************
  * MD5 checksum
  ************************************************************************/
+
+struct globus_l_gfs_posix_cksm_md5_cb_t
+{
+    globus_gfs_operation_t             op;
+    MD5_CTX                            c;
+    int                                fd;
+    globus_off_t                       fsize;
+    globus_off_t                       blocksize;
+    globus_off_t                       offset;
+    globus_off_t                       length;
+    globus_off_t                       total_bytes;
+};
+
+#define MAXBLOCSIZE4CKSM 4*1024*1024
+
+void 
+globus_l_gfs_posix_cksm_md5_cb(
+    void *                             user_arg)
+{
+    char                               buffer[MAXBLOCSIZE4CKSM+1];
+    globus_off_t                       readlen;
+    globus_result_t                    result;
+    unsigned char                      md5digest[MD5_DIGEST_LENGTH];
+    int i;
+
+    struct globus_l_gfs_posix_cksm_md5_cb_t * mmm;
+
+    mmm = (struct globus_l_gfs_posix_cksm_md5_cb_t *) user_arg;
+    lseek(mmm->fd, mmm->offset, SEEK_SET); 
+    if ( mmm->length == 0 )
+    {
+        close(mmm->fd);
+
+        MD5_Final(md5digest, &(mmm->c));
+        for(i = 0; i < MD5_DIGEST_LENGTH; ++i)
+            sprintf(&cksm[i*2], "%02x", (unsigned int)md5digest[i]);
+        cksm[MD5_DIGEST_LENGTH*2+1] = '\0';
+
+        globus_gridftp_server_finished_command(mmm->op, GLOBUS_SUCCESS, cksm);       
+        globus_free(mmm);
+    }
+    else
+    {
+        readlen = read(mmm->fd, buffer, ( mmm->length > mmm->blocksize ?
+                                          mmm->blocksize : mmm->length ) );
+        mmm->offset += readlen;
+        mmm->length -= readlen;
+        mmm->total_bytes += readlen;
+
+        MD5_Update(&(mmm->c), buffer, readlen);
+
+        char                        count[128];
+        sprintf(count, "%"GLOBUS_OFF_T_FORMAT, mmm->total_bytes);
+        globus_gridftp_server_intermediate_command(mmm->op, GLOBUS_SUCCESS, count);
+
+        result = globus_callback_register_oneshot( NULL,
+                                                   NULL,
+                                                   globus_l_gfs_posix_cksm_md5_cb,
+                                                   mmm);
+        if(result != GLOBUS_SUCCESS)
+        {
+            result = GlobusGFSErrorWrapFailed(
+                "globus_callback_register_oneshot", result);
+            globus_panic(NULL, result, "oneshot failed, no recovery");
+        }
+    }
+}
+
 globus_result_t 
 globus_l_gfs_posix_cksm_md5(
+    globus_gfs_operation_t             op,
     char *                             filename,
-    char *                             cksm)
+    globus_off_t                       offset,
+    globus_off_t                       length)
 {
-    int rc, fd, len, i;
-    char *ext_md5, buf[65536], ext_cmd[1024], *pt;
+    char *ext_md5, ext_cmd[1024], *pt;
     FILE *F;
+
+    int rc, fd;
     struct stat stbuf;
-    MD5_CTX c;
-    unsigned char md5digest[MD5_DIGEST_LENGTH];
+    globus_result_t                    result;
 
     ext_md5 = NULL;
     if ((ext_md5 = getenv("GRIDFTP_CKSUM_EXT_MD5")) != NULL)
@@ -766,20 +845,41 @@ globus_l_gfs_posix_cksm_md5(
 
         pt = strchr(cksm, ' ');
         if (pt != NULL) pt[0] = '\0'; /* take the first string */ 
+
+        globus_gridftp_server_finished_command(op, GLOBUS_SUCCESS, cksm);       
     }
     else /* calculate md5 */
     {
+        struct globus_l_gfs_posix_cksm_md5_cb_t * mmm;
+
         rc = stat(filename, &stbuf);
         if (rc != 0 || ! S_ISREG(stbuf.st_mode) || (fd = open(filename,O_RDONLY)) < 0)
             return GLOBUS_FAILURE;
-        MD5_Init(&c);
-        while ((len = read(fd, buf, 65536)) > 0)
-            MD5_Update(&c, buf, len);
-        close(fd);
-        MD5_Final(md5digest, &c);
-        for(i = 0; i < MD5_DIGEST_LENGTH; ++i)
-            sprintf(&cksm[i*2], "%02x", (unsigned int)md5digest[i]);
-        cksm[MD5_DIGEST_LENGTH*2+1] = '\0';
+
+        mmm = globus_malloc(sizeof( struct globus_l_gfs_posix_cksm_md5_cb_t));
+        MD5_Init(&(mmm->c));
+
+        if (length < 0 || (offset + length) > stbuf.st_size) 
+            length = stbuf.st_size - offset;
+
+        mmm->op = op;
+        mmm->fd = fd;
+        mmm->blocksize = MAXBLOCSIZE4CKSM;
+        mmm->fsize = stbuf.st_size;
+        mmm->offset = offset;
+        mmm->length = length;
+        mmm->total_bytes = 0;
+
+        result = globus_callback_register_oneshot( NULL,
+                                                   NULL,
+                                                   globus_l_gfs_posix_cksm_md5_cb,
+                                                   mmm);
+        if(result != GLOBUS_SUCCESS)
+        {
+            result = GlobusGFSErrorWrapFailed(
+                "globus_callback_register_oneshot", result);
+            globus_panic(NULL, result, "oneshot failed, no recovery");
+        }
 
     }
     return GLOBUS_SUCCESS;
@@ -814,7 +914,6 @@ globus_l_gfs_posix_command(
     char *                              PathName;
     globus_l_gfs_posix_handle_t *       posix_handle;
     globus_result_t                     rc;
-    char                                cmd_data[128];
     struct utimbuf                      ubuf;
     GlobusGFSName(globus_l_gfs_posix_command);
 
@@ -874,10 +973,14 @@ globus_l_gfs_posix_command(
       case GLOBUS_GFS_CMD_CKSM:
         if (!strcmp(cmd_info->cksm_alg, "adler32") || 
             !strcmp(cmd_info->cksm_alg, "ADLER32"))
-            rc = globus_l_gfs_posix_cksm_adler32(PathName, cmd_data);
+            rc = globus_l_gfs_posix_cksm_adler32(op, 
+                                                 PathName);
         else if (!strcmp(cmd_info->cksm_alg, "md5") ||
                   !strcmp(cmd_info->cksm_alg, "MD5"))
-            rc = globus_l_gfs_posix_cksm_md5(PathName, cmd_data);
+            rc = globus_l_gfs_posix_cksm_md5(op,
+                                             PathName,
+                                             cmd_info->cksm_offset,
+                                             cmd_info->cksm_length);
         else
             rc = GLOBUS_FAILURE;
         break;
@@ -887,7 +990,8 @@ globus_l_gfs_posix_command(
         break;
     }
 
-    globus_gridftp_server_finished_command(op, rc, cmd_data);
+    if ( rc != GLOBUS_SUCCESS || cmd_info->command != GLOBUS_GFS_CMD_CKSM)
+        globus_gridftp_server_finished_command(op, rc, NULL);
 }
 
 /* receive file from client */
