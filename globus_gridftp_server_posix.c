@@ -797,19 +797,27 @@ globus_l_gfs_posix_cksm_md5_cb(
     {
         readlen = read(md5updt->fd, buffer, ( md5updt->length > md5updt->blocksize ?
                                           md5updt->blocksize : md5updt->length ) );
-        md5updt->offset += readlen;
-        md5updt->length -= readlen;
-        md5updt->total_bytes += readlen;
-
-        MD5_Update(&(md5updt->c), buffer, readlen);
-
-        t = time(NULL);
-        if ( (t - md5updt->t_lastmarker) > md5updt->marker_freq )
+        if (readlen > 0 && errno == 0)
         {
-            md5updt->t_lastmarker = t;
-            char                        count[128];
-            sprintf(count, "%"GLOBUS_OFF_T_FORMAT, md5updt->total_bytes);
-            globus_gridftp_server_intermediate_command(md5updt->op, GLOBUS_SUCCESS, count);
+            md5updt->offset += readlen;
+            md5updt->length -= readlen;
+            md5updt->total_bytes += readlen;
+
+            MD5_Update(&(md5updt->c), buffer, readlen);
+
+            t = time(NULL);
+            if ( (t - md5updt->t_lastmarker) > md5updt->marker_freq )
+            {
+                md5updt->t_lastmarker = t;
+                char                        count[128];
+                sprintf(count, "%"GLOBUS_OFF_T_FORMAT, md5updt->total_bytes);
+                globus_gridftp_server_intermediate_command(md5updt->op, GLOBUS_SUCCESS, count);
+            }
+        }
+        else
+        {   // something isn't right, we will end getting a timeout
+            errno = 0;
+            sleep(2);
         }
 
         result = globus_callback_register_oneshot( NULL,
